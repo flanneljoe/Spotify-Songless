@@ -1,0 +1,25 @@
+﻿@page "/auth-error"
+@inject NavigationManager Nav
+
+<h2 class="mb-3">Spotify Authentication Error</h2>
+
+<div class="alert alert-danger">
+    <p class="mb-1"><strong>Error:</strong> @errorCode</p>
+    <p class="mb-0"><strong>Details:</strong> @errorDescription</p>
+</div>
+
+<a class="btn btn-outline-light" href="">Go Home</a>
+
+@code {
+    string errorCode = "Unknown";
+    string errorDescription = "No details provided.";
+
+    protected override void OnInitialized()
+    {
+        var uri = new Uri(Nav.Uri);
+        var query = System.Web.HttpUtility.ParseQueryString(uri.Query);
+
+        errorCode = query["error"] ?? "Unknown";
+        errorDescription = query["description"] ?? "No details provided.";
+    }
+}

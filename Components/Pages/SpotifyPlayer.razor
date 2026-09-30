@@ -1,0 +1,243 @@
+﻿@page "/player"
+
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
+
+@implements IAsyncDisposable
+@inject SpotifyAuthService AuthService
+@inject SpotifyMusicService MusicService
+@inject SpotifyPlayerService PlayerService
+
+<div class="card">
+    <div class="card-body">
+        <h3 class="mb-3">Spotify Songless</h3>
+
+        @if (!string.IsNullOrEmpty(errorMessage))
+        {
+            <div class="alert alert-danger">@errorMessage</div>
+        }
+
+        @if (!isReady)
+        {
+            <p class="text-body-secondary"><span class="spinner-border spinner-border-sm me-2"></span>Initializing player...</p>
+        }
+        else if (currentTrack is null)
+        {
+            <p class="text-body-secondary"><span class="spinner-border spinner-border-sm me-2"></span>Loading track...</p>
+        }
+        else
+        {
+            <p>A track is loaded and ready. Can you guess what it is?</p>
+
+            <div class="d-flex gap-2 mb-3">
+                <button class="btn btn-primary" @onclick="PlaySnippet" disabled="@isPlaying">Play</button>
+                <button class="btn btn-outline-secondary" @onclick="PausePlayback" disabled="@(!isPlaying)">Pause</button>
+            </div>
+
+            <div class="input-group mb-3">
+                <input class="form-control" @bind="guess" @bind:event="oninput" placeholder="Enter your guess..." disabled="@isRoundOver" />
+                <button class="btn btn-primary" @onclick="SubmitGuess" disabled="@isRoundOver">Guess</button>
+            </div>
+
+            @if (!isRoundOver)
+            {
+                <button class="btn btn-outline-danger mb-3" @onclick="GiveUp">Give Up</button>
+            }
+
+            @if (incorrectGuesses > 0)
+            {
+                <p class="text-warning small">Incorrect guesses: @incorrectGuesses</p>
+            }
+
+            @if (isCorrect)
+            {
+                <div class="alert alert-success">Correct! The song was <strong>@currentTrack.Value.TrackName</strong> by @currentTrack.Value.ArtistName</div>
+                <button class="btn btn-success" @onclick="PlayAgain">Play Again</button>
+            }
+            else if (gaveUp)
+            {
+                <div class="alert alert-secondary">The song was <strong>@currentTrack.Value.TrackName</strong> by @currentTrack.Value.ArtistName</div>
+                <button class="btn btn-primary" @onclick="PlayAgain">Play Again</button>
+            }
+        }
+    </div>
+</div>
+
+@code {
+    private CancellationTokenSource? _snippetCts;
+    private DotNetObjectReference<SpotifyPlayer>? _dotNetRef;
+    private string? _deviceId;
+    private string? errorMessage;
+
+    private bool isReady = false;
+    private bool isPlaying = false;
+    private bool isCorrect = false;
+    private bool gaveUp = false;
+    private bool isRoundOver => isCorrect || gaveUp;
+
+    private string guess = string.Empty;
+    private int incorrectGuesses = 0;
+
+    // Snippet durations in milliseconds for each guess attempt
+    private static readonly int[] SnippetDurations = { 2000, 4000, 8000, 16000, 30000 };
+
+    private (string TrackId, string TrackName, string ArtistName)? currentTrack;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            var token = await AuthService.GetAccessTokenAsync();
+            if (token is null)
+            {
+                errorMessage = "No Spotify session found. Please log in.";
+                return;
+            }
+
+            _dotNetRef = DotNetObjectReference.Create(this);
+            await PlayerService.InitializeAsync(_dotNetRef, token);
+        }
+    }
+
+    // Called from JS when the player device is ready
+    [JSInvokable]
+    public async Task OnPlayerReady(string deviceId)
+    {
+        _deviceId = deviceId;
+        isReady = true;
+        await LoadNewTrack();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    // Called from JS when player state changes
+    [JSInvokable]
+    public async Task OnPlayerStateChanged(bool paused, int position, int duration)
+    {
+        isPlaying = !paused;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    // Called from JS on player errors
+    [JSInvokable]
+    public async Task OnPlayerError(string message)
+    {
+        errorMessage = $"Player error: {message}";
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task LoadNewTrack()
+    {
+        _snippetCts?.Cancel();
+        isCorrect = false;
+        gaveUp = false;
+        incorrectGuesses = 0;
+        guess = string.Empty;
+        currentTrack = await MusicService.GetRandomSavedTrackAsync();
+
+        if (currentTrack is null)
+            errorMessage = "Couldn't find a playable track. Please try again.";
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task PlayAgain()
+    {
+        _snippetCts?.Cancel();
+        await PlayerService.PauseAsync();
+        await LoadNewTrack();
+    }
+
+    private async Task PlaySnippet()
+    {
+        if (currentTrack is null || _deviceId is null)
+            return;
+
+        // After the round ends the full song is loaded, so just resume it without a snippet timer
+        if (isRoundOver)
+        {
+            await PlayerService.ResumeAsync();
+            return;
+        }
+
+        var token = await AuthService.GetAccessTokenAsync();
+        if (token is null) 
+            return;
+
+        // Cancel any existing snippet timer
+        _snippetCts?.Cancel();
+        _snippetCts = new CancellationTokenSource();
+        var token2 = _snippetCts.Token;
+
+        var trackUri = $"spotify:track:{currentTrack.Value.TrackId}";
+        var snippetDuration = SnippetDurations[Math.Min(incorrectGuesses, SnippetDurations.Length - 1)];
+
+        await PlayerService.PlayTrackAsync(token, _deviceId, trackUri);
+        await PlayerService.SeekAsync(0);
+
+        // Start snippet timer
+        _ = Task.Delay(snippetDuration, token2).ContinueWith(async t =>
+        {
+            if (t.IsCanceled) 
+                return;
+            await PlayerService.PauseAsync();
+            await InvokeAsync(StateHasChanged);
+        });
+    }
+
+    private async Task PausePlayback()
+    {
+        _snippetCts?.Cancel();
+        await PlayerService.PauseAsync();
+    }
+
+    private async Task SubmitGuess()
+    {
+        if (currentTrack is null || isRoundOver || string.IsNullOrWhiteSpace(guess)) return;
+
+        if (TrackNameMatcher.IsMatch(guess, currentTrack.Value.TrackName))
+        {
+            isCorrect = true;
+            await PlayFullTrack();
+        }
+        else
+        {
+            incorrectGuesses++;
+            guess = string.Empty;
+        }
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task GiveUp()
+    {
+        if (currentTrack is null || isRoundOver) return;
+
+        gaveUp = true;
+        await PlayFullTrack();
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    // Stops any snippet and plays the current track from the start with no snippet cutoff
+    private async Task PlayFullTrack()
+    {
+        _snippetCts?.Cancel();
+        await PlayerService.PauseAsync();
+
+        if (currentTrack is null || _deviceId is null)
+            return;
+
+        var token = await AuthService.GetAccessTokenAsync();
+        if (token is null)
+            return;
+
+        await PlayerService.PlayTrackAsync(token, _deviceId, $"spotify:track:{currentTrack.Value.TrackId}");
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _snippetCts?.Cancel();
+        _snippetCts?.Dispose();
+        await PlayerService.DisconnectAsync();
+        _dotNetRef?.Dispose();
+    }
+}

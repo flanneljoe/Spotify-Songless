@@ -1,0 +1,58 @@
+﻿@page "/"
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
+
+<PageTitle>Home</PageTitle>
+
+@inject SpotifyAuthService Auth
+@inject SpotifyMusicService MusicService
+@inject NavigationManager Nav
+
+<div class="text-center py-5">
+    <h1 class="mb-4">Songless</h1>
+
+    @if (!Auth.IsAuthenticated())
+    {
+        <p class="text-body-secondary mb-4">Hear a snippet, guess the song.</p>
+        <button class="btn btn-primary btn-lg" @onclick="Login">Login with Spotify</button>
+    }
+    else if (isLoading)
+    {
+        <p class="text-body-secondary"><span class="spinner-border spinner-border-sm me-2"></span>Loading a track...</p>
+    }
+    else if (track is null)
+    {
+        <p>Couldn't find a track with a preview. Try again!</p>
+        <button class="btn btn-primary" @onclick="LoadTrack">Retry</button>
+    }
+    else
+    {
+        <p><strong>Track:</strong> @track.Value.TrackName</p>
+        <p><strong>Artist:</strong> @track.Value.ArtistName</p>
+        <div class="d-flex gap-2 justify-content-center">
+            <button class="btn btn-primary" @onclick="LoadTrack">Get Another Track</button>
+            <button class="btn btn-outline-secondary" @onclick="Logout">Log out</button>
+        </div>
+    }
+</div>
+
+
+@code {
+    (string TrackId, string TrackName, string ArtistName)? track;
+    bool isLoading = false;
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (Auth.IsAuthenticated())
+            await LoadTrack();
+    }
+
+    async Task LoadTrack()
+    {
+        isLoading = true;
+        track = await MusicService.GetRandomSavedTrackAsync();
+        isLoading = false;
+    }
+
+    void Login() => Nav.NavigateTo("/auth/begin", forceLoad: true);
+    void Logout() { Auth.Logout(); Nav.NavigateTo("/", forceLoad: true); }
+}
